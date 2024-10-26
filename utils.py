@@ -24,7 +24,7 @@ def calculate_spectral_indices(band_1, band_2, band_3, band_4, band_5, band_6, b
     NDBI = np.divide(swir_1 - nir, swir_1 + nir + epsilon, where=swir_1 + nir > epsilon)
     
     # EBBI calculation
-    EBBI = (swir_1 - nir) / (10 * np.sqrt((swir_1 + nir) + epsilon)) * (swir_2 + epsilon)
+    EBBI = np.divide((swir_1 - nir), (10 * np.sqrt((swir_1 + swir_2) + epsilon)), where=(swir_1 + swir_2 > epsilon))
     
     NDVI = np.clip(NDVI, -1, 1)
     NDBI = np.clip(NDBI, -1, 1)
@@ -34,75 +34,34 @@ def calculate_spectral_indices(band_1, band_2, band_3, band_4, band_5, band_6, b
 
 def classify_land_use(NDVI, NDBI, NDWI, EBBI):
     """
-    Classify land use into 5 categories based on spectral indices.
-    
-    Parameters:
-    -----------
-    NDVI: numpy array
-        Normalized Difference Vegetation Index
-    NDBI: numpy array
-        Normalized Difference Built-up Index
-    NDWI: numpy array
-        Normalized Difference Water Index
-    EBBI: numpy array
-        Enhanced Built-Up and Bareness Index
-    
-    Returns:
-    --------
-    numpy array
-        Classification array with values:
-        0: Barren Land
-        1: Dense Vegetation
-        2: Moderate Vegetation
-        3: Urban Areas
-        4: Water Bodies
+    Classify land use into 5 categories:
+    0: Barren Land
+    1: Dense Vegetation
+    2: Moderate Vegetation
+    3: Urban Areas
+    4: Water Bodies
     """
-    # Initialize output array
+    # Initialize with zeros (barren land) and use uint8 for memory efficiency
     classification = np.zeros_like(NDVI, dtype=np.uint8)
     
-    # Define masks for each land use class
+    # Create boolean masks for each class
+    # Note: Order of masks is important due to potential overlaps
     masks = {
-        # Water bodies: High NDWI, low NDVI
-        'water': (NDWI > 0.3) & (NDVI < 0.2),
-        
-        # Dense vegetation: High NDVI, negative NDBI
-        'dense_veg': (NDVI > 0.5) & (NDBI < 0) & (NDWI < 0.3),
-        
-        # Moderate vegetation: Medium NDVI, low EBBI
-        'mod_veg': (NDVI >= 0.25) & (NDVI <= 0.5) & (EBBI < 0) & (NDWI < 0.3),
-        
-        # Urban areas: High NDBI or high EBBI with low vegetation
-        'urban': ((NDBI > 0) & (NDVI < 0.25)) | 
-                ((EBBI > 0) & (NDVI < 0.25) & (NDWI < 0.3)),
-        
-        # Barren land: Low NDVI, moderate EBBI, not water
-        'barren': (NDVI < 0.25) & (EBBI > -0.25) & (EBBI < 0.25) & (NDWI < 0.3)
+        'water': (NDWI > 0.00) & (NDVI < 0.25),
+        'dense_veg': (NDVI > 0.65) & (NDWI < 0.10) & (NDBI < -0.10),
+        'mod_veg': (NDVI > 0.30) & (NDVI <= 0.65) & (NDWI < 0.10),
+        'urban': ((NDBI > 0.00) & (NDVI < 0.20) & (EBBI > -0.10)) | 
+                ((NDBI > 0.00) & (NDVI < 0.30))
     }
     
-    # Apply masks in order of priority
-    # Water bodies take precedence
+    # Everything starts as barren land (class 0)
+    # Then apply masks in priority order
     classification = np.where(masks['water'], 4, classification)
-    
-    # Dense vegetation in non-water areas
-    classification = np.where(masks['dense_veg'] & ~masks['water'], 
-                            1, classification)
-    
-    # Moderate vegetation in areas not already classified
-    classification = np.where(masks['mod_veg'] & 
-                            ~masks['water'] & 
-                            ~masks['dense_veg'], 
+    classification = np.where(masks['dense_veg'] & ~masks['water'], 1, classification)
+    classification = np.where(masks['mod_veg'] & ~masks['water'] & ~masks['dense_veg'], 
                             2, classification)
-    
-    # Urban areas in remaining areas
-    classification = np.where(masks['urban'] & 
-                            ~masks['water'] & 
-                            ~masks['dense_veg'] & 
-                            ~masks['mod_veg'], 
-                            3, classification)
-    
-    # Barren land in any remaining unclassified areas
-    classification = np.where((classification == 0) & masks['barren'], 
-                            0, classification)
+    classification = np.where(masks['urban'] & ~masks['water'] & ~masks['dense_veg'] & 
+                            ~masks['mod_veg'], 3, classification)
     
     return classification
 
@@ -132,6 +91,7 @@ def process_landsat_data(file_path):
         'NDBI': NDBI,
         'NDWI': NDWI,
         'EBBI': EBBI,
+        'DEM' : DEM,
         'air_temp': air_temp,
         'precipitation': precipitation
     }
@@ -155,6 +115,7 @@ def save_processed_data(processed_data_list, output_dir='processed_data'):
             'NDBI': data['NDBI'],
             'NDWI': data['NDWI'],
             'EBBI': data['EBBI'],
+            'DEM' : data['DEM'],
             'air_temp': data['air_temp'],
             'precipitation': data['precipitation']
         }

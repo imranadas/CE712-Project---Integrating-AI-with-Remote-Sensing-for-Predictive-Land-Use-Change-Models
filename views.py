@@ -108,6 +108,129 @@ def create_map_with_slider(processed_data_list, bounds, roi_gdf):
     
     return m
 
+def create_prediction_map_with_slider(processed_data_list, bounds, roi_gdf):
+    map_center = [26.907436, 75.794157]
+    zoom_level = 10
+    m = geemap.Map(center=map_center, zoom=zoom_level)
+    
+    # Add ROI
+    m.add_gdf(roi_gdf, "Region of Interest")
+    
+    # Create custom colormap for classification
+    classification_colors = {
+        0: '#FFD700',  # Barren - Yellow
+        1: '#006400',  # Dense Vegetation - Dark Green
+        2: '#90EE90',  # Moderate Vegetation - Light Green
+        3: '#FF0000',  # Urban - Red
+        4: '#00008B'   # Water - Blue
+    }
+    
+    # Create time slider with explicit prediction labels
+    slider_options = []
+    for i, data in enumerate(processed_data_list):
+        date_str = data['date_str']
+        # Check if this is a predicted date
+        if i >= len([d for d in processed_data_list if 'classification' in d]):
+            date_str = f"{date_str} (Predicted)"
+        slider_options.append((date_str, i))
+    
+    slider = widgets.SelectionSlider(
+        options=slider_options,
+        description='Date:',
+        continuous_update=False,
+        style={'description_width': 'initial'},
+        layout=widgets.Layout(width='500px')
+    )
+    
+    # Keep track of current layers
+    current_layers = []
+    
+    # Custom colormap function with alpha for predictions
+    def custom_colormap(classification, is_prediction=False):
+        colored = np.zeros((*classification.shape, 4), dtype=np.uint8)  # Added alpha channel
+        for class_val, color in classification_colors.items():
+            mask = (classification == class_val)
+            rgb = tuple(int(color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
+            for i, c in enumerate(rgb):
+                colored[mask, i] = c
+            # Set alpha channel (more transparent for predictions)
+            colored[mask, 3] = 180 if is_prediction else 255
+        return colored
+    
+    # Function to update visible layers
+    def update_layers(change):
+        nonlocal current_layers
+        
+        # Get the index of the selected date
+        new_value = change['new']
+        if isinstance(new_value, (list, tuple)) and len(new_value) > 1:
+            idx = new_value[1]
+        else:
+            idx = new_value
+            
+        # Remove current layers
+        for layer in current_layers:
+            if layer in m.layers:
+                m.remove_layer(layer)
+        current_layers.clear()
+        
+        # Create and add new layers for the selected date
+        data = processed_data_list[idx]
+        
+        # Check if this is a prediction
+        is_prediction = 'Predicted' in slider_options[idx][0]
+        
+        # Convert classification to RGBA image
+        rgb_image = custom_colormap(data['classification'], is_prediction)
+        img = Image.fromarray(rgb_image)
+        buffered = io.BytesIO()
+        img.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
+        
+        layer = ImageOverlay(
+            url=f"data:image/png;base64,{img_str}",
+            bounds=bounds,
+            name=f'Land Use Classification - {data["date_str"]}'
+        )
+        m.add_layer(layer)
+        current_layers.append(layer)
+        
+        # Add prediction indicator if needed
+        if is_prediction:
+            prediction_text = widgets.HTML(
+                value='<div style="background-color: rgba(255,255,0,0.2); padding: 8px; border-radius: 4px;">'
+                      '<b>⚠️ Predicted Data</b></div>'
+            )
+            if not hasattr(m, 'prediction_control'):
+                m.prediction_control = WidgetControl(widget=prediction_text, position='topright')
+                m.add_control(m.prediction_control)
+        else:
+            if hasattr(m, 'prediction_control'):
+                m.remove_control(m.prediction_control)
+                delattr(m, 'prediction_control')
+    
+    # Register the update function
+    slider.observe(update_layers, names='value')
+    
+    # Add legend with prediction note
+    legend_dict = {
+        'Barren Land': '#FFD700',
+        'Dense Vegetation': '#006400',
+        'Moderate Vegetation': '#90EE90',
+        'Urban Areas': '#FF0000',
+        'Water Bodies': '#00008B',
+    }
+    m.add_legend(title="Land Use Classification", legend_dict=legend_dict)
+    
+    # Add slider to map
+    slider_control = WidgetControl(widget=slider, position='topright')
+    m.add_control(slider_control)
+    
+    # Initialize the first view
+    update_layers({'new': (processed_data_list[0]['date_str'], 0)})
+    
+    return m
+
 def create_band_viewer(processed_data_dir):
     plt.ioff()
     
