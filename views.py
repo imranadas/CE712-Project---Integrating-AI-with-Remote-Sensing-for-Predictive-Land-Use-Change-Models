@@ -7,10 +7,13 @@ import pandas as pd
 from PIL import Image
 from ipywidgets import widgets
 import matplotlib.pyplot as plt
+from typing import List, Dict, Any
 from IPython.display import display
 from ipyleaflet import ImageOverlay
 from ipyleaflet import WidgetControl
 from utils import process_landsat_data
+import matplotlib.gridspec as gridspec
+from matplotlib.colors import ListedColormap
 
 def create_map_with_slider(processed_data_list, bounds, roi_gdf):
     map_center = [26.907436, 75.794157]
@@ -524,6 +527,144 @@ def create_classification_viewer(processed_data_list):
         plot_output
     ])
     
+def create_prediction_viewer(processed_data_list):
+    plt.ioff()
+    
+    # Create widgets
+    date_slider = widgets.SelectionSlider(
+        options=[(f"{data['date_str']} {'(Predicted)' if 'Predicted' in data.get('type', '') else ''}", i) 
+                for i, data in enumerate(processed_data_list)],
+        description='Date:',
+        continuous_update=False,
+        style={'description_width': 'initial'},
+        layout=widgets.Layout(width='500px')
+    )
+    
+    stats_text = widgets.HTML(
+        layout=widgets.Layout(width='500px', height='150px')
+    )
+    
+    # Create output widget for the plot
+    plot_output = widgets.Output()
+    
+    # Define class information with colors and labels
+    class_info = {
+        'Barren Land': {'value': 0, 'color': '#FFD700', 'cmap': 'YlOrBr'},
+        'Dense Vegetation': {'value': 1, 'color': '#006400', 'cmap': 'Greens'},
+        'Moderate Vegetation': {'value': 2, 'color': '#90EE90', 'cmap': 'YlGn'},
+        'Urban': {'value': 3, 'color': '#FF0000', 'cmap': 'Reds'},
+        'Water': {'value': 4, 'color': '#00008B', 'cmap': 'Blues'}
+    }
+    
+    # Create custom colormap for combined view
+    combined_colors = [info['color'] for info in class_info.values()]
+    custom_cmap = ListedColormap(combined_colors)
+    
+    def create_plot(idx):
+        with plot_output:
+            plot_output.clear_output(wait=True)
+            
+            data = processed_data_list[idx]
+            is_prediction = 'Predicted' in data.get('type', '')
+            
+            # Create figure with subplots
+            fig = plt.figure(figsize=(20, 15))
+            gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
+            
+            # Plot individual class maps
+            for i, (label, info) in enumerate(class_info.items()):
+                if i < 5:  # Only create 5 subplots (one for each class)
+                    ax = fig.add_subplot(gs[i // 3, i % 3])
+                    mask = data['classification'] == info['value']
+                    
+                    # Use specific colormap for each class
+                    im = ax.imshow(mask, cmap=info['cmap'])
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    
+                    # Add prediction indicator if needed
+                    title = f"{label}\n"
+                    if is_prediction:
+                        title += "(Predicted)"
+                    ax.set_title(title)
+                    ax.axis('off')
+            
+            # Create combined view
+            ax_combined = fig.add_subplot(gs[1, 2])
+            im_combined = ax_combined.imshow(data['classification'], 
+                                           cmap=custom_cmap, 
+                                           vmin=0, 
+                                           vmax=4)
+            
+            # Add colorbar for combined view
+            cbar = fig.colorbar(im_combined, ax=ax_combined, 
+                              fraction=0.046, 
+                              pad=0.04)
+            cbar.set_ticks(np.arange(5))
+            cbar.set_ticklabels(class_info.keys())
+            
+            # Add title for combined view
+            title = "Combined Classification\n"
+            if is_prediction:
+                title += "(Predicted)"
+            ax_combined.set_title(title)
+            ax_combined.axis('off')
+            
+            plt.tight_layout()
+            display(fig)
+            plt.close(fig)
+            
+            # Update statistics
+            total_pixels = np.size(data['classification'])
+            stats_html = f"""
+            <h4>Land Cover Statistics for {data['date_str']}</h4>
+            <table style='width:100%; border-collapse: collapse;'>
+                <tr style='background-color: #f2f2f2;'>
+                    <th style='padding: 8px; text-align: left;'>Class</th>
+                    <th style='padding: 8px; text-align: right;'>Coverage</th>
+                    <th style='padding: 8px; text-align: right;'>Pixels</th>
+                </tr>
+            """
+            
+            for label, info in class_info.items():
+                class_pixels = np.sum(data['classification'] == info['value'])
+                percentage = (class_pixels / total_pixels) * 100
+                stats_html += f"""
+                <tr>
+                    <td style='padding: 8px;'>{label}</td>
+                    <td style='padding: 8px; text-align: right;'>{percentage:.1f}%</td>
+                    <td style='padding: 8px; text-align: right;'>{class_pixels:,}</td>
+                </tr>
+                """
+            
+            stats_html += "</table>"
+            
+            if is_prediction:
+                stats_html += """
+                <div style='margin-top: 10px; padding: 8px; background-color: #fff3cd; 
+                           border: 1px solid #ffeeba; border-radius: 4px;'>
+                    <strong>⚠️ Note:</strong> This is a predicted classification
+                </div>
+                """
+            
+            stats_text.value = stats_html
+    
+    def update_display(change):
+        idx = change['new'][1] if isinstance(change['new'], tuple) else change['new']
+        create_plot(idx)
+    
+    # Register the update function
+    date_slider.observe(update_display, names='value')
+    
+    # Initial plot
+    create_plot(0)
+    
+    return widgets.VBox([
+        widgets.HTML("<h2>Land Cover Classification Viewer</h2>"),
+        date_slider,
+        stats_text,
+        plot_output
+    ])
+    
 def analyze_time_series(data_dir):
     from concurrent.futures import ThreadPoolExecutor
     from functools import partial
@@ -606,4 +747,129 @@ def plot_time_series(results):
     
     plt.tight_layout()
     plt.show()
+    
+    
+def visualize_predictions(predictions: List[Dict[str, Any]]) -> None:
+    """
+    Visualize prediction results.
+    
+    Args:
+        predictions: List of prediction dictionaries
+    """
+    if not predictions:
+        print("No predictions to visualize")
+        return
+    
+    # Set up the visualization
+    n_predictions = len(predictions)
+    fig = plt.figure(figsize=(15, 4 * n_predictions))
+    gs = gridspec.GridSpec(n_predictions, 2, figure=fig)
+    
+    # Create custom colormap for classifications
+    class_colors = ['yellow', 'darkgreen', 'red', 'darkblue']
+    class_cmap = ListedColormap(class_colors)
+    
+    # Plot each prediction
+    for idx, pred in enumerate(predictions):
+        # Plot classification
+        ax1 = fig.add_subplot(gs[idx, 0])
+        im1 = ax1.imshow(pred['classification'], cmap=class_cmap)
+        ax1.set_title(f"Predicted Land Use\n{pred['date_str']}")
+        plt.colorbar(im1, ax=ax1, ticks=range(4),
+                    label='Class',
+                    boundaries=np.arange(-0.5, 5.5))
+        
+        # Plot confidence
+        ax2 = fig.add_subplot(gs[idx, 1])
+        im2 = ax2.imshow(pred['confidence'], cmap='RdYlGn')
+        ax2.set_title(f"Prediction Confidence\n{pred['date_str']}")
+        plt.colorbar(im2, ax=ax2, label='Confidence Score')
+    
+    plt.tight_layout()
+    plt.show()
+
+class ModelAnalysis:
+    """Class for analyzing model performance and predictions."""
+    
+    @staticmethod
+    def analyze_class_distribution(predictions: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        Analyze class distribution over time.
+        
+        Args:
+            predictions: List of prediction dictionaries
+            
+        Returns:
+            DataFrame with class distribution analysis
+        """
+        results = []
+        for pred in predictions:
+            total_pixels = pred['classification'].size
+            distribution = {
+                'date': pred['date_str'],
+                'total_pixels': total_pixels
+            }
+            
+            # Calculate class percentages
+            unique, counts = np.unique(pred['classification'], return_counts=True)
+            for cls, count in zip(unique, counts):
+                cls_name = f"class_{cls}_percent"
+                distribution[cls_name] = (count / total_pixels) * 100
+            
+            results.append(distribution)
+        
+        return pd.DataFrame(results)
+    
+    @staticmethod
+    def analyze_confidence(predictions: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        Analyze prediction confidence.
+        
+        Args:
+            predictions: List of prediction dictionaries
+            
+        Returns:
+            DataFrame with confidence analysis
+        """
+        results = []
+        for pred in predictions:
+            confidence = pred['confidence']
+            results.append({
+                'date': pred['date_str'],
+                'mean_confidence': np.mean(confidence),
+                'min_confidence': np.min(confidence),
+                'max_confidence': np.max(confidence),
+                'std_confidence': np.std(confidence)
+            })
+        
+        return pd.DataFrame(results)
+    
+    @staticmethod
+    def analyze_spatial_changes(predictions: List[Dict[str, Any]]) -> pd.DataFrame:
+        """
+        Analyze spatial changes between predictions.
+        
+        Args:
+            predictions: List of prediction dictionaries
+            
+        Returns:
+            DataFrame with spatial change analysis
+        """
+        results = []
+        for i in range(len(predictions) - 1):
+            current = predictions[i]['classification']
+            next_pred = predictions[i + 1]['classification']
+            
+            changes = current != next_pred
+            change_percentage = np.mean(changes) * 100
+            
+            results.append({
+                'from_date': predictions[i]['date_str'],
+                'to_date': predictions[i + 1]['date_str'],
+                'change_percentage': change_percentage,
+                'pixels_changed': np.sum(changes),
+                'total_pixels': changes.size
+            })
+        
+        return pd.DataFrame(results)
     
