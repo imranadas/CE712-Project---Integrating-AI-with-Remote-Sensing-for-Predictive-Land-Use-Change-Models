@@ -1,6 +1,5 @@
-Data/
 py_venv/
-Dataset/
+DataSet/
 Processed_DataSet/
 
 # Byte-compiled / optimized / DLL files
