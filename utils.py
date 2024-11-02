@@ -3,6 +3,118 @@ import pickle
 import numpy as np
 from datetime import datetime
 
+def read_metadata(mtl_file):
+    """
+    Read Landsat 8 metadata from MTL file.
+    
+    Args:
+        mtl_file: Path to the MTL metadata file
+        
+    Returns:
+        Dictionary containing relevant metadata parameters
+    """
+    metadata = {}
+    
+    try:
+        with open(mtl_file, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith('SOLAR_ELEVATION_ANGLE'):
+                    metadata['SOLAR_ELEVATION_ANGLE'] = float(line.split('=')[1].strip())
+                elif line.startswith('EARTH_SUN_DISTANCE'):
+                    metadata['EARTH_SUN_DISTANCE'] = float(line.split('=')[1].strip())
+                elif line.startswith('RADIANCE_MULT_BAND'):
+                    band = line.split('_')[3]
+                    metadata[f'ML_B{band}'] = float(line.split('=')[1].strip())
+                elif line.startswith('RADIANCE_ADD_BAND'):
+                    band = line.split('_')[3]
+                    metadata[f'AL_B{band}'] = float(line.split('=')[1].strip())
+    except Exception as e:
+        print(f"Error reading metadata file: {str(e)}")
+        return None
+        
+    return metadata
+
+def calculate_spectral_reflectance(band_data, ml, al, solar_elevation_angle, earth_sun_distance=1):
+    """
+    Calculate surface reflectance from Landsat 8 DN values using radiometric coefficients
+    and solar geometry.
+    
+    Args:
+        band_data: Raw DN values from Landsat 8 band
+        ml: Multiplicative scaling factor from metadata
+        al: Additive scaling factor from metadata
+        solar_elevation_angle: Sun elevation angle in degrees
+        earth_sun_distance: Earth-Sun distance in astronomical units (default=1)
+        
+    Returns:
+        Surface reflectance values
+    """
+    # Convert solar elevation angle to radians
+    solar_zenith = (90 - solar_elevation_angle) * np.pi / 180
+    
+    # Calculate TOA Radiance
+    l_lambda = ml * band_data.astype(float) + al
+    
+    # Calculate TOA Reflectance with correction for solar angle
+    # π * L_λ * d^2 / (ESUN_λ * cos(θ_sz))
+    # where ESUN_λ values are band-specific solar irradiance values
+    # For Landsat 8, we can use the provided TOA reflectance coefficients
+    # and just correct for solar angle
+    p_lambda = l_lambda / np.cos(solar_zenith)
+    
+    # Clip values to valid range [0,1]
+    return np.clip(p_lambda, 0, 1)
+
+def process_landsat_spectral_data(file_path, metadata):
+    """
+    Process Landsat 8 data to surface reflectance before calculating indices.
+    
+    Args:
+        file_path: Path to the Landsat data file
+        metadata: Dictionary containing:
+                 - ML and AL values for each band
+                 - solar_elevation_angle
+                 - earth_sun_distance (optional)
+    
+    Returns:
+        List containing processed surface reflectance bands and other data
+    """
+    data = np.load(file_path, allow_pickle=True)
+    
+    # Extract solar parameters
+    solar_elevation = metadata.get('SOLAR_ELEVATION_ANGLE', 45.0)  # Default 45 degrees
+    earth_sun_dist = metadata.get('EARTH_SUN_DISTANCE', 1.0)  # Default 1 AU
+    
+    # Define coefficients for each band
+    band_coeffs = {
+        'B1': {'ml': metadata.get('ML_B1', 0.00002), 'al': metadata.get('AL_B1', -0.1)},
+        'B2': {'ml': metadata.get('ML_B2', 0.00002), 'al': metadata.get('AL_B2', -0.1)},
+        'B3': {'ml': metadata.get('ML_B3', 0.00002), 'al': metadata.get('AL_B3', -0.1)},
+        'B4': {'ml': metadata.get('ML_B4', 0.00002), 'al': metadata.get('AL_B4', -0.1)},
+        'B5': {'ml': metadata.get('ML_B5', 0.00002), 'al': metadata.get('AL_B5', -0.1)},
+        'B6': {'ml': metadata.get('ML_B6', 0.00002), 'al': metadata.get('AL_B6', -0.1)},
+        'B7': {'ml': metadata.get('ML_B7', 0.00002), 'al': metadata.get('AL_B7', -0.1)},
+    }
+    
+    # Process each band to surface reflectance
+    processed_bands = []
+    for i, band in enumerate(['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']):
+        coeffs = band_coeffs[band]
+        processed = calculate_spectral_reflectance(
+            data[i],
+            ml=coeffs['ml'],
+            al=coeffs['al'],
+            solar_elevation_angle=solar_elevation,
+            earth_sun_distance=earth_sun_dist
+        )
+        processed_bands.append(processed)
+    
+    # Add remaining data (DEM, air_temp, precipitation)
+    processed_bands.extend(data[7:])
+    
+    return processed_bands
+
 def calculate_spectral_indices(band_1, band_2, band_3, band_4, band_5, band_6, band_7):
     epsilon = 1e-10
     
@@ -66,7 +178,15 @@ def classify_land_use(NDVI, NDBI, NDWI, EBBI):
     return classification
 
 def process_landsat_data(file_path):
-    data = np.load(file_path, allow_pickle=True)
+    # Get metadata
+    mtl_file = file_path.replace('.npy', '_MTL.txt')
+    metadata = read_metadata(mtl_file)
+    if metadata is None:
+        print(f"Warning: Using default values for {file_path}")
+        metadata = {}
+    
+    # Process to surface reflectance
+    processed_data = process_landsat_spectral_data(file_path, metadata)
     
     date_str = os.path.basename(file_path).split('.')[0]
     try:
@@ -74,10 +194,8 @@ def process_landsat_data(file_path):
     except ValueError:
         date = datetime.strptime(date_str, '%Y%m%d')
     
-    SR_B1, SR_B2, SR_B3, SR_B4, SR_B5, SR_B6, SR_B7, DEM, air_temp, precipitation = data[:10]
-    
-    # Calculate indices
-    indices = calculate_spectral_indices(SR_B1, SR_B2, SR_B3, SR_B4, SR_B5, SR_B6, SR_B7)
+    # Calculate indices using surface reflectance values
+    indices = calculate_spectral_indices(*processed_data[:7])
     NDVI, NDBI, NDWI, EBBI = indices
     
     # Calculate classification
@@ -91,9 +209,9 @@ def process_landsat_data(file_path):
         'NDBI': NDBI,
         'NDWI': NDWI,
         'EBBI': EBBI,
-        'DEM' : DEM,
-        'air_temp': air_temp,
-        'precipitation': precipitation
+        'DEM': processed_data[7],
+        'air_temp': processed_data[8],
+        'precipitation': processed_data[9]
     }
 
 def save_processed_data(processed_data_list, output_dir='processed_data'):
