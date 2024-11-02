@@ -118,62 +118,76 @@ def process_landsat_spectral_data(file_path, metadata):
 def calculate_spectral_indices(band_1, band_2, band_3, band_4, band_5, band_6, band_7):
     epsilon = 1e-10
     
-    ultrablue = band_1
-    blue = band_2
-    green = band_3
-    red = band_4
-    nir = band_5
-    swir_1 = band_6
-    swir_2 = band_7
-    
     # NDVI calculation
-    NDVI = np.divide(nir - red, nir + red + epsilon, where=nir + red > epsilon)
+    NDVI = np.divide(band_5 - band_4, band_5 + band_4 + epsilon, 
+                    where=band_5 + band_4 > epsilon)
     
-    # NDWI calculation
-    NDWI = np.divide(green - nir, green + nir + epsilon, where= green + nir > epsilon)
+    # MNDWI calculation (replacing original NDWI)
+    MNDWI = np.divide(band_3 - band_6, band_3 + band_6 + epsilon,
+                     where=band_3 + band_6 > epsilon)
     
     # NDBI calculation
-    NDBI = np.divide(swir_1 - nir, swir_1 + nir + epsilon, where=swir_1 + nir > epsilon)
+    NDBI = np.divide(band_6 - band_5, band_6 + band_5 + epsilon,
+                    where=band_6 + band_5 > epsilon)
     
     # EBBI calculation
-    EBBI = np.divide((swir_1 - nir), (10 * np.sqrt((swir_1 + swir_2) + epsilon)), where=(swir_1 + swir_2 > epsilon))
+    EBBI = np.divide(band_6 - band_5, 
+                    10 * np.sqrt(band_6 + band_7 + epsilon),
+                    where=band_6 + band_7 > epsilon)
     
+    # UI calculation
+    UI = np.divide(band_7 - band_5, band_7 + band_5 + epsilon,
+                  where=band_7 + band_5 > epsilon)
+    
+    # BSI calculation
+    BSI = np.divide((band_6 + band_4) - (band_5 + band_2),
+                    (band_6 + band_4) + (band_5 + band_2) + epsilon,
+                    where=(band_6 + band_4 + band_5 + band_2) > epsilon)
+    
+    # Clip indices to valid ranges
     NDVI = np.clip(NDVI, -1, 1)
+    MNDWI = np.clip(MNDWI, -1, 1)
     NDBI = np.clip(NDBI, -1, 1)
-    NDWI = np.clip(NDWI, -1, 1)
+    UI = np.clip(UI, -1, 1)
+    BSI = np.clip(BSI, -1, 1)
     
-    return NDVI, NDBI, NDWI, EBBI
+    return NDVI, MNDWI, NDBI, EBBI, UI, BSI
 
-def classify_land_use(NDVI, NDBI, NDWI, EBBI):
+def classify_land_use(NDVI, MNDWI, NDBI, EBBI, UI, BSI):
     """
-    Classify land use into 5 categories:
+    Enhanced land use classification with 7 classes:
     0: Barren Land
     1: Dense Vegetation
     2: Moderate Vegetation
     3: Urban Areas
     4: Water Bodies
+    5: Bare Soil
+    6: Mixed Urban
     """
-    # Initialize with zeros (barren land) and use uint8 for memory efficiency
     classification = np.zeros_like(NDVI, dtype=np.uint8)
     
-    # Create boolean masks for each class
-    # Note: Order of masks is important due to potential overlaps
     masks = {
-        'water': (NDWI > 0.00) & (NDVI < 0.25),
-        'dense_veg': (NDVI > 0.65) & (NDWI < 0.10) & (NDBI < -0.10),
-        'mod_veg': (NDVI > 0.30) & (NDVI <= 0.65) & (NDWI < 0.10),
-        'urban': ((NDBI > 0.00) & (NDVI < 0.20) & (EBBI > -0.10)) | 
-                ((NDBI > 0.00) & (NDVI < 0.30))
+        'water': (MNDWI > 0.10) & (NDVI < 0.00),
+        'dense_veg': (NDVI > 0.40) & (MNDWI < 0.00) & (NDBI < 0.00),
+        'mod_veg': (NDVI > 0.25) & (NDVI <= 0.40) & (MNDWI < 0.00),
+        'urban': ((NDBI > 0.20) & (UI > 0) & (NDVI < 0.25)) |
+                ((EBBI > 0) & (UI > 0) & (NDVI < 0.25)),
+        'mixed_urban': (NDBI > 0) & (NDBI <= 0.20) & (UI > 0) & (NDVI < 0.3),
+        'bare_soil': (BSI > 0) & (NDVI < 0.2) & ~(NDBI > 0.3)
     }
     
-    # Everything starts as barren land (class 0)
-    # Then apply masks in priority order
+    # Apply masks in priority order
     classification = np.where(masks['water'], 4, classification)
     classification = np.where(masks['dense_veg'] & ~masks['water'], 1, classification)
     classification = np.where(masks['mod_veg'] & ~masks['water'] & ~masks['dense_veg'], 
                             2, classification)
     classification = np.where(masks['urban'] & ~masks['water'] & ~masks['dense_veg'] & 
                             ~masks['mod_veg'], 3, classification)
+    classification = np.where(masks['mixed_urban'] & ~masks['water'] & ~masks['dense_veg'] & 
+                            ~masks['mod_veg'] & ~masks['urban'], 6, classification)
+    classification = np.where(masks['bare_soil'] & ~masks['water'] & ~masks['dense_veg'] & 
+                            ~masks['mod_veg'] & ~masks['urban'] & ~masks['mixed_urban'],
+                            5, classification)
     
     return classification
 
@@ -196,26 +210,34 @@ def process_landsat_data(file_path):
     
     # Calculate indices using surface reflectance values
     indices = calculate_spectral_indices(*processed_data[:7])
-    NDVI, NDBI, NDWI, EBBI = indices
+    NDVI, MNDWI, NDBI, EBBI, UI, BSI = indices
     
     # Calculate classification
-    classification = classify_land_use(NDVI, NDBI, NDWI, EBBI)
+    classification = classify_land_use(NDVI, MNDWI, NDBI, EBBI, UI, BSI)
     
     return {
         'date': date,
         'date_str': date_str,
         'classification': classification,
         'NDVI': NDVI,
+        'MNDWI': MNDWI,  # Changed from NDWI
         'NDBI': NDBI,
-        'NDWI': NDWI,
         'EBBI': EBBI,
+        'UI': UI,        # New index
+        'BSI': BSI,      # New index
         'DEM': processed_data[7],
         'air_temp': processed_data[8],
         'precipitation': processed_data[9]
     }
 
 def save_processed_data(processed_data_list, output_dir='processed_data'):
-    """Save processed data to pickle files for faster loading"""
+    """
+    Save processed data to pickle files with enhanced indices and metadata.
+    
+    Args:
+        processed_data_list: List of dictionaries containing processed Landsat data
+        output_dir: Directory to save processed files (default: 'processed_data')
+    """
     os.makedirs(output_dir, exist_ok=True)
     
     # Save individual date files
@@ -224,25 +246,54 @@ def save_processed_data(processed_data_list, output_dir='processed_data'):
         filename = f"{date_str}_processed.pkl"
         filepath = os.path.join(output_dir, filename)
         
-        # Select only necessary data to save
+        # Select data to save with enhanced indices
         save_data = {
             'date': data['date'],
             'date_str': date_str,
             'classification': data['classification'],
+            # Spectral indices
             'NDVI': data['NDVI'],
+            'MNDWI': data['MNDWI'],  # Changed from NDWI to MNDWI
             'NDBI': data['NDBI'],
-            'NDWI': data['NDWI'],
             'EBBI': data['EBBI'],
-            'DEM' : data['DEM'],
+            'UI': data['UI'],        # Added Urban Index
+            'BSI': data['BSI'],      # Added Bare Soil Index
+            # Environmental data
+            'DEM': data['DEM'],
             'air_temp': data['air_temp'],
-            'precipitation': data['precipitation']
+            'precipitation': data['precipitation'],
+            # Add metadata
+            'processing_date': datetime.now(),
+            'data_type': 'enhanced_classification',
+            'version': '2.0',
+            'indices_info': {
+                'NDVI': 'Normalized Difference Vegetation Index',
+                'MNDWI': 'Modified Normalized Difference Water Index',
+                'NDBI': 'Normalized Difference Built-up Index',
+                'EBBI': 'Enhanced Built-Up and Bareness Index',
+                'UI': 'Urban Index',
+                'BSI': 'Bare Soil Index'
+            },
+            'classification_scheme': {
+                0: 'Barren Land',
+                1: 'Dense Vegetation',
+                2: 'Moderate Vegetation',
+                3: 'Urban Areas',
+                4: 'Water Bodies',
+                5: 'Bare Soil',
+                6: 'Mixed Urban'
+            }
         }
         
-        with open(filepath, 'wb') as f:
-            pickle.dump(save_data, f)
+        try:
+            with open(filepath, 'wb') as f:
+                pickle.dump(save_data, f)
+            print(f"Successfully saved {filename}")
+        except Exception as e:
+            print(f"Error saving {filename}: {str(e)}")
             
 def load_processed_data(processed_dir='processed_data'):
-    """Load processed data from pickle files"""
+    """Load processed data with compatibility handling for new indices."""
     if not os.path.exists(processed_dir):
         return None
         
@@ -250,9 +301,23 @@ def load_processed_data(processed_dir='processed_data'):
     for filename in sorted(os.listdir(processed_dir)):
         if filename.endswith('_processed.pkl'):
             filepath = os.path.join(processed_dir, filename)
-            with open(filepath, 'rb') as f:
-                data = pickle.load(f)
-                processed_data_list.append(data)
+            try:
+                with open(filepath, 'rb') as f:
+                    data = pickle.load(f)
+                    
+                    # Handle legacy data format
+                    if 'NDWI' in data and 'MNDWI' not in data:
+                        data['MNDWI'] = data['NDWI']
+                    if 'UI' not in data:
+                        data['UI'] = np.zeros_like(data['NDVI'])
+                    if 'BSI' not in data:
+                        data['BSI'] = np.zeros_like(data['NDVI'])
+                    
+                    processed_data_list.append(data)
+                    print(f"Successfully loaded {filename}")
+            except Exception as e:
+                print(f"Error loading {filename}: {str(e)}")
+                continue
     
     return sorted(processed_data_list, key=lambda x: x['date'])
 
